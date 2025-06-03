@@ -1,14 +1,23 @@
 import sys
 import os
 import time # For formatting date
+import shutil # Added for delete action
+import os
+import time # For formatting date
+import shutil # Added for delete action
+import datetime # Added for Properties
+import stat     # Added for Properties
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget,
                              QVBoxLayout, QListWidget, QHBoxLayout,
                              QLineEdit, QPushButton, QTabWidget, QFileDialog,
                              QTreeWidget, QTreeWidgetItem, QLabel, QMessageBox,
-                             QTreeWidgetItemIterator)
+                             QTreeWidgetItemIterator, QMenu, QAbstractItemView,
+                             QInputDialog, QDialog, QFormLayout, QDialogButtonBox)
 from PyQt6.QtCore import Qt
 from duplicate_finder_logic import DuplicateScannerThread
 from file_type_scanner_logic import FileTypeScannerThread
+from file_search_logic import FileSearchThread # Added FileSearchThread
+from file_search_logic import FileSearchThread # Added FileSearchThread
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -53,8 +62,30 @@ class MainWindow(QMainWindow):
         sort_layout.addWidget(self.sort_type_button)
         self.file_browser_layout.addLayout(sort_layout)
 
+        # Search UI
+        search_layout = QHBoxLayout()
+        self.search_bar = QLineEdit()
+        self.search_bar.setPlaceholderText("Search in current folder and subfolders (Enter to search)...")
+        self.search_bar.returnPressed.connect(self.handle_file_search) # Connect here
+        search_layout.addWidget(self.search_bar)
+
+        self.search_button = QPushButton("Search")
+        self.search_button.clicked.connect(self.handle_file_search) # Connect here
+        search_layout.addWidget(self.search_button)
+
+        self.clear_search_button = QPushButton("Clear Search / Back")
+        self.clear_search_button.clicked.connect(self.clear_file_search_view) # Connect here
+        search_layout.addWidget(self.clear_search_button)
+        self.file_browser_layout.addLayout(search_layout)
+
+        self.search_thread = None
+        self.is_search_view_active = False
+
         self.list_widget = QListWidget()
         self.list_widget.itemDoubleClicked.connect(self.handle_item_double_click)
+        self.list_widget.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.list_widget.customContextMenuRequested.connect(self.show_file_browser_context_menu)
+        self.list_widget.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection) # Enable multi-selection
         self.file_browser_layout.addWidget(self.list_widget)
 
         self.tab_widget.addTab(file_browser_widget, "File Browser")
@@ -193,16 +224,36 @@ class MainWindow(QMainWindow):
         self.load_directory_contents(self.current_path)
 
     def load_directory_contents(self, path):
+        # Guard against reloading if search view is active and path hasn't changed by explicit navigation
+        # and not currently in the process of clearing search for a new load.
+        if self.is_search_view_active and path == self.current_path and not hasattr(self, '_clearing_search'):
+            # print("load_directory_contents: Search view active on same path, refresh via 'Clear Search'.")
+            return
+
+        # If navigating to a new path (e.g. via address bar, double-click, up button), clear search.
+        # Check _clearing_search to prevent recursion if called from clear_file_search_view itself.
+        if self.is_search_view_active and path != self.current_path and not hasattr(self, '_clearing_search'):
+            self.clear_file_search_view(new_path_to_load_after_clear=path)
+            return # clear_file_search_view will call load_directory_contents again
+
         try:
             path = os.path.abspath(path)
             self.list_widget.clear()
+
             if not os.path.isdir(path):
                 self.list_widget.addItem(f"Error: Not a directory - {path}")
                 self.current_path = path
                 self.address_bar.setText(self.current_path)
                 return
+
+            # Path is valid and is a directory
             self.current_path = path
-            self.address_bar.setText(self.current_path)
+            # Only update address bar text if not in search view or if search is being cleared.
+            if not self.is_search_view_active or hasattr(self, '_clearing_search'):
+                 self.address_bar.setText(self.current_path)
+            # If it was a direct navigation, ensure search view is false.
+            # If called from clear_file_search_view, is_search_view_active is already false.
+            # self.is_search_view_active = False # This is now handled more carefully in clear_file_search_view
             items_details = []
             raw_items = os.listdir(path)
             for name in raw_items:
@@ -240,10 +291,34 @@ class MainWindow(QMainWindow):
         if parent_path != self.current_path: self.load_directory_contents(parent_path)
 
     def handle_item_double_click(self, item):
-        item_name = item.text()
-        if item_name.endswith("/"): item_name = item_name[:-1]
-        potential_path = os.path.join(self.current_path, item_name)
-        if os.path.isdir(potential_path): self.load_directory_contents(potential_path)
+        if self.is_search_view_active:
+            full_path = item.data(Qt.ItemDataRole.UserRole)
+            if full_path:
+                if os.path.isdir(full_path):
+                    self.clear_file_search_view(new_path_to_load_after_clear=full_path)
+                elif os.path.isfile(full_path):
+                    try:
+                        if sys.platform == "win32": os.startfile(full_path)
+                        elif sys.platform == "darwin": os.system(f'open "{full_path}"')
+                        else: os.system(f'xdg-open "{full_path}"')
+                    except Exception as e:
+                        QMessageBox.warning(self, "Open File Error", f"Could not open file '{os.path.basename(full_path)}':\n{e}")
+            return
+
+        # Original double-click logic for file browser view
+        item_name_display = item.text()
+        item_name_for_path = item_name_display.rstrip('/')
+        potential_path = os.path.join(self.current_path, item_name_for_path)
+
+        if os.path.isdir(potential_path):
+            self.load_directory_contents(potential_path)
+        elif os.path.isfile(potential_path):
+             try:
+                if sys.platform == "win32": os.startfile(potential_path)
+                elif sys.platform == "darwin": os.system(f'open "{potential_path}"')
+                else: os.system(f'xdg-open "{potential_path}"')
+             except Exception as e:
+                QMessageBox.warning(self, "Open File Error", f"Could not open file '{os.path.basename(potential_path)}':\n{e}")
 
     # --- Methods for Duplicate Finder ---
     def add_scan_folder(self): # This is for Duplicate Finder
@@ -479,3 +554,337 @@ class MainWindow(QMainWindow):
             # If no error and not cancelled, populate_type_scan_results should have set the final status.
 
         self.type_scanner_thread = None
+
+    # --- File Search Methods ---
+    def handle_file_search(self):
+        search_term = self.search_bar.text().strip()
+        if not search_term:
+            if self.is_search_view_active:
+                self.clear_file_search_view()
+            else:
+                QMessageBox.information(self, "Search", "Please enter a search term.")
+            return
+
+        if self.search_thread and self.search_thread.isRunning():
+            QMessageBox.information(self, "Search", "A search is already in progress. Please cancel or wait.")
+            return
+
+        self.list_widget.clear()
+        self.is_search_view_active = True
+
+        self.type_status_label.setText(f"Searching for '{search_term}' in '{self.current_path}'...")
+        self.address_bar.setText(f"Search Results: '{search_term}' (in '{os.path.basename(self.current_path)}')")
+
+        self.search_button.setEnabled(False)
+        self.clear_search_button.setText("Cancel Search")
+
+        self.search_thread = FileSearchThread(self.current_path, search_term)
+        self.search_thread.search_progress.connect(self.update_search_progress)
+        self.search_thread.search_complete.connect(self.display_search_results)
+        self.search_thread.search_error.connect(self.handle_search_error)
+        self.search_thread.finished.connect(self.search_thread_finished)
+        self.search_thread.start()
+
+    def update_search_progress(self, message):
+        self.type_status_label.setText(f"Search: {message}")
+
+    def display_search_results(self, matches):
+        self.list_widget.clear()
+        if not self.is_search_view_active:
+            return
+
+        if not matches:
+            self.list_widget.addItem("No results found.")
+            self.type_status_label.setText(f"Search complete. No results for '{self.search_bar.text()}'.")
+            return
+
+        self.type_status_label.setText(f"Search complete. Found {len(matches)} items.")
+
+        for path_match in matches:
+            display_name = os.path.basename(path_match)
+            list_item_text = display_name
+
+            item = QListWidgetItem(list_item_text)
+            item.setData(Qt.ItemDataRole.UserRole, path_match)
+            item.setToolTip(path_match)
+
+            try:
+                if os.path.isdir(path_match):
+                    item.setText(f"[D] {display_name}") # Prepend [D] for visual cue
+                # else: item.setText(display_name) # No specific cue for files in search result
+            except OSError:
+                 item.setText(display_name + " (Error accessing)")
+            self.list_widget.addItem(item)
+
+        # print("Search results displayed.") # Console confirmation
+
+    def handle_search_error(self, error_message):
+        if not self.is_search_view_active: return
+        QMessageBox.critical(self, "Search Error", error_message)
+        self.type_status_label.setText(f"Search error: {error_message}")
+        # search_thread_finished will be called, which resets some UI state.
+
+    def search_thread_finished(self):
+        self.search_button.setEnabled(True)
+        self.clear_search_button.setText("Clear Search / Back")
+
+        final_status = self.type_status_label.text()
+        if self.search_thread and not self.search_thread._is_running :
+            final_status = "Search cancelled."
+        # Avoid overwriting specific error or "no results" messages
+        elif "Search complete" not in final_status and "Search error" not in final_status and "Search cancelled" not in final_status:
+             final_status = "Search finished."
+
+        self.type_status_label.setText(final_status)
+        self.search_thread = None
+
+    def clear_file_search_view(self, new_path_to_load_after_clear=None):
+        # Flag to prevent re-entry issues with load_directory_contents
+        if hasattr(self, '_clearing_search') and self._clearing_search:
+            return
+        self._clearing_search = True
+
+        if self.search_thread and self.search_thread.isRunning():
+            self.search_thread.stop()
+            # Don't wait here; let 'finished' signal handle final UI updates for responsiveness.
+
+        self.search_bar.clear()
+        self.is_search_view_active = False # Critical: set before calling load_directory_contents
+
+        self.search_button.setEnabled(True)
+        self.clear_search_button.setText("Clear Search / Back")
+
+        path_to_load = new_path_to_load_after_clear if new_path_to_load_after_clear is not None else self.current_path
+
+        self.load_directory_contents(path_to_load)
+        self.type_status_label.setText("Status: Ready.")
+
+        if hasattr(self, '_clearing_search'):
+            delattr(self, '_clearing_search')
+
+
+    # --- Context Menu for File Browser ---
+    def show_file_browser_context_menu(self, position):
+        menu = QMenu()
+        selected_list_widget_items = self.list_widget.selectedItems()
+        item_at_pos = self.list_widget.itemAt(position)
+
+        action_delete = menu.addAction("Delete")
+        action_rename = menu.addAction("Rename")
+        action_properties = menu.addAction("Properties")
+        action_create_folder = menu.addAction("Create New Folder")
+        menu.addSeparator()
+        action_refresh = menu.addAction("Refresh")
+
+        if self.is_search_view_active:
+            action_refresh.triggered.connect(self.clear_file_search_view) # Refresh in search clears search
+            # Create folder in search view operates on original current_path after confirmation
+            action_create_folder.triggered.connect(self.create_new_folder_in_current_dir)
+        else: # Normal browser view
+            action_refresh.triggered.connect(lambda: self.load_directory_contents(self.current_path))
+            action_create_folder.triggered.connect(self.create_new_folder_in_current_dir)
+
+        if item_at_pos:
+            num_selected = len(selected_list_widget_items)
+
+            action_delete.setEnabled(num_selected > 0)
+            action_rename.setEnabled(num_selected == 1)
+            action_properties.setEnabled(num_selected == 1)
+            action_create_folder.setEnabled(False) # Create folder is for empty space
+
+            if num_selected > 0: action_delete.triggered.connect(self.delete_selected_items)
+            if num_selected == 1:
+                action_rename.triggered.connect(self.rename_selected_item)
+                action_properties.triggered.connect(self.show_item_properties)
+        else: # Clicked on empty space
+            action_delete.setEnabled(False)
+            action_rename.setEnabled(False)
+            action_properties.setEnabled(False)
+            action_create_folder.setEnabled(True)
+            # Connection for create_folder already handled by view mode check
+
+        menu.exec(self.list_widget.mapToGlobal(position))
+
+    def show_item_properties(self):
+        selected_list_items = self.list_widget.selectedItems()
+        if not selected_list_items or len(selected_list_items) > 1: return
+
+        list_item = selected_list_items[0]
+        item_name_for_error_msg = list_item.text()
+
+        if self.is_search_view_active:
+            full_path = list_item.data(Qt.ItemDataRole.UserRole)
+            if not full_path :
+                QMessageBox.information(self, "Properties", f"Could not determine item path for '{item_name_for_error_msg}' from search result.")
+                return
+        else:
+            item_name_display = list_item.text()
+            item_name_for_path = item_name_display.rstrip('/')
+            full_path = os.path.join(self.current_path, item_name_for_path)
+
+        if not os.path.exists(full_path) and not os.path.islink(full_path):
+             QMessageBox.warning(self, "Properties Error", f"Item '{os.path.basename(full_path)}' no longer exists.")
+             if not self.is_search_view_active: self.load_directory_contents(self.current_path)
+             elif list_item:
+                 row = self.list_widget.row(list_item)
+                 if row != -1: self.list_widget.takeItem(row)
+             return
+
+        dialog = PropertiesDialog(full_path, self)
+        dialog.exec()
+
+    def create_new_folder_in_current_dir(self):
+        target_path_for_new_folder = self.current_path
+
+        if self.is_search_view_active:
+            reply = QMessageBox.information(self, "Create Folder",
+                                           f"This will create a new folder in the last browsed directory: '{target_path_for_new_folder}'.\nThe current search view will be cleared. Continue?",
+                                           QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel)
+            if reply == QMessageBox.StandardButton.Cancel:
+                return
+            self._clearing_search = True # Use the flag correctly
+            self.clear_file_search_view(new_path_to_load_after_clear=target_path_for_new_folder)
+            if hasattr(self, '_clearing_search'): delattr(self, '_clearing_search')
+        folder_name, ok = QInputDialog.getText(self, "Create New Folder",
+                                               "Enter folder name:")
+
+        if ok and folder_name:
+            # Basic validation for folder name (e.g., no slashes, etc.) could be added here
+            # For now, rely on OS to reject invalid names
+            new_folder_path = os.path.join(self.current_path, folder_name)
+
+            if os.path.exists(new_folder_path):
+                QMessageBox.warning(self, "Create Folder Error",
+                                    f"A file or folder named '{folder_name}' already exists in this location.")
+                return
+
+            try:
+                os.makedirs(new_folder_path)
+                print(f"Created folder: {new_folder_path}") # Using print for now
+                self.load_directory_contents(self.current_path) # Refresh list
+            except OSError as e:
+                print(f"Error creating folder '{folder_name}': {e}") # Using print for now
+                QMessageBox.critical(self, "Create Folder Error",
+                                     f"Error creating folder '{folder_name}':\n{e}")
+        elif ok and not folder_name: # User pressed OK but entered an empty name
+            QMessageBox.warning(self, "Create Folder Error", "Folder name cannot be empty.")
+
+    def rename_selected_item(self):
+        selected_list_items = self.list_widget.selectedItems()
+        if not selected_list_items or len(selected_list_items) > 1: return
+
+        list_item = selected_list_items[0]
+        old_name_display_from_list = list_item.text()
+
+        if self.is_search_view_active:
+            old_full_path = list_item.data(Qt.ItemDataRole.UserRole)
+            if not old_full_path:
+                QMessageBox.information(self, "Rename", "Could not determine item's full path from search result.")
+                return
+            current_dir_of_item = os.path.dirname(old_full_path)
+            old_name = os.path.basename(old_full_path)
+        else: # Normal view
+            old_name = old_name_display_from_list.rstrip('/')
+            old_full_path = os.path.join(self.current_path, old_name)
+            current_dir_of_item = self.current_path
+
+        new_name, ok = QInputDialog.getText(self, "Rename Item",
+                                            f"Enter new name for '{old_name}':",
+                                            text=old_name)
+        if ok and new_name:
+            if new_name == old_name: return
+            new_full_path = os.path.join(current_dir_of_item, new_name)
+
+            if os.path.exists(new_full_path):
+                QMessageBox.warning(self, "Rename Error", f"An item named '{new_name}' already exists in '{current_dir_of_item}'.")
+                return
+            try:
+                os.rename(old_full_path, new_full_path)
+                print(f"Renamed '{old_name_display_from_list}' to '{new_name}'")
+                if self.is_search_view_active:
+                    # Update item in search view
+                    list_item.setText(new_name + ("/" if os.path.isdir(new_full_path) else "")) # Keep visual cue if dir
+                    list_item.setData(Qt.ItemDataRole.UserRole, new_full_path)
+                    list_item.setToolTip(new_full_path)
+                else:
+                    self.load_directory_contents(self.current_path)
+            except OSError as e:
+                print(f"Error renaming '{old_name_display_from_list}': {e}")
+                QMessageBox.critical(self, "Rename Error", f"Error renaming '{old_name_display_from_list}':\n{e}")
+        elif ok and not new_name:
+             QMessageBox.warning(self, "Rename Error", "New name cannot be empty.")
+
+
+    def delete_selected_items(self):
+        selected_list_items = self.list_widget.selectedItems()
+        if not selected_list_items: return
+
+        confirm_message = ""
+        if self.is_search_view_active:
+            confirm_message = f"Are you sure you want to delete {len(selected_list_items)} item(s) from search results?\nThis will affect their original locations."
+        elif len(selected_list_items) == 1:
+            confirm_message = f"Are you sure you want to delete '{selected_list_items[0].text()}'?"
+        else:
+            confirm_message = f"Are you sure you want to delete {len(selected_list_items)} selected items?"
+
+        reply = QMessageBox.warning(self, "Confirm Delete", confirm_message,
+                                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                                    QMessageBox.StandardButton.No)
+        if reply == QMessageBox.StandardButton.Yes:
+            errors_occurred = False
+            items_to_remove_from_gui_list = []
+
+            for list_item_gui in selected_list_items:
+                item_text_display = list_item_gui.text()
+
+                if self.is_search_view_active:
+                    full_path = list_item_gui.data(Qt.ItemDataRole.UserRole)
+                    if not full_path:
+                        QMessageBox.critical(self, "Delete Error", f"Could not determine path for '{item_text_display}'.")
+                        errors_occurred = True
+                        continue
+                else: # Normal view
+                    item_name_for_path = item_text_display.rstrip('/')
+                    full_path = os.path.join(self.current_path, item_name_for_path)
+
+                try:
+                    if not os.path.exists(full_path) and not os.path.islink(full_path):
+                        print(f"Error: Item '{item_text_display}' not found at '{full_path}' before deletion.")
+                        QMessageBox.critical(self, "Delete Error", f"Could not find '{item_text_display}'. It may have been already removed.")
+                        errors_occurred = True
+                        if self.is_search_view_active: items_to_remove_from_gui_list.append(list_item_gui)
+                        continue
+
+                    if os.path.isdir(full_path):
+                        shutil.rmtree(full_path)
+                        print(f"Deleted directory: {full_path}")
+                    elif os.path.isfile(full_path) or os.path.islink(full_path): # os.remove handles files and links
+                        os.remove(full_path)
+                        print(f"Deleted file/link: {full_path}")
+                    else:
+                        print(f"Error: Item '{item_text_display}' at '{full_path}' is not a file or directory.")
+                        QMessageBox.critical(self, "Delete Error", f"Item '{item_text_display}' is not a file or directory.")
+                        errors_occurred = True
+                        continue # Skip to next item
+
+                    if self.is_search_view_active: items_to_remove_from_gui_list.append(list_item_gui)
+                except OSError as e:
+                    print(f"Error deleting '{item_text_display}': {e}")
+                    QMessageBox.critical(self, "Delete Error", f"Error deleting '{item_text_display}':\n{e}")
+                    errors_occurred = True
+
+            if self.is_search_view_active:
+                for item_to_remove in items_to_remove_from_gui_list:
+                    row = self.list_widget.row(item_to_remove)
+                    if row != -1: self.list_widget.takeItem(row)
+                if self.list_widget.count() == 0: self.list_widget.addItem("No results remaining.")
+                final_status_msg = "Deletion from search results complete."
+                if errors_occurred: final_status_msg += " Some errors occurred."
+                print(final_status_msg)
+                self.type_status_label.setText(final_status_msg)
+            else: # Normal view
+                self.load_directory_contents(self.current_path) # Refresh
+                final_status_msg = "Deletion complete."
+                if errors_occurred: final_status_msg += " Some errors occurred."
+                print(final_status_msg)
+                self.type_status_label.setText(final_status_msg)

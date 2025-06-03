@@ -150,6 +150,142 @@ class TestDuplicateFinderLogic(unittest.TestCase):
 if __name__ == "__main__":
     unittest.main()
 
+# Helper to ensure QApplication exists for tests needing it (like QThread based tests)
+_app_instance = None
+def get_qapp_instance():
+    global _app_instance
+    if _app_instance is None:
+        _app_instance = QApplication.instance()
+        if _app_instance is None:
+            # sys.argv might not exist if run outside a typical script context (e.g. some test runners)
+            _app_instance = QApplication(sys.argv if hasattr(sys, 'argv') and sys.argv else ['test_app'])
+    return _app_instance
+
+
+class TestFileOperations(unittest.TestCase):
+    def setUp(self):
+        self.app = get_qapp_instance() # Needed for QThread (FileSearchThread) and QMessageBox
+        self.window = MainWindow()
+        self.test_dir = tempfile.mkdtemp()
+        self.window.current_path = self.test_dir # Critical for window methods to operate on test_dir
+
+        self.file_to_delete = os.path.join(self.test_dir, "delete_me.txt")
+        with open(self.file_to_delete, "w") as f: f.write("content")
+
+        self.folder_to_delete = os.path.join(self.test_dir, "delete_folder")
+        os.makedirs(self.folder_to_delete)
+        with open(os.path.join(self.folder_to_delete, "dummy.txt"), "w") as f: f.write("in folder")
+
+        self.search_target_dir = os.path.join(self.test_dir, "search_area")
+        os.makedirs(self.search_target_dir)
+        with open(os.path.join(self.search_target_dir, "search_file_apple.txt"), "w") as f: f.write("apple")
+        with open(os.path.join(self.search_target_dir, "another_APPLE_file.doc"), "w") as f: f.write("apple doc")
+        os.makedirs(os.path.join(self.search_target_dir, "sub_dir_with_apple"))
+
+    def tearDown(self):
+        shutil.rmtree(self.test_dir)
+        # self.window.close() # If it were a real window.
+        self.window = None # Allow GC
+
+    def test_delete_single_file(self):
+        self.window.list_widget.clear() # Ensure clean state
+        item = QListWidgetItem("delete_me.txt")
+        self.window.list_widget.addItem(item)
+        self.window.list_widget.setCurrentItem(item)
+
+        original_qmessagebox_warning = QMessageBox.warning
+        QMessageBox.warning = lambda *args: QMessageBox.StandardButton.Yes # Auto-confirm
+        try:
+            self.window.delete_selected_items()
+        finally:
+            QMessageBox.warning = original_qmessagebox_warning # Restore
+
+        self.assertFalse(os.path.exists(self.file_to_delete), "File was not deleted.")
+
+    def test_delete_single_folder(self):
+        self.window.list_widget.clear()
+        item = QListWidgetItem("delete_folder/") # GUI adds '/' for dirs
+        self.window.list_widget.addItem(item)
+        self.window.list_widget.setCurrentItem(item)
+
+        original_qmessagebox_warning = QMessageBox.warning
+        QMessageBox.warning = lambda *args: QMessageBox.StandardButton.Yes
+        try:
+            self.window.delete_selected_items()
+        finally:
+            QMessageBox.warning = original_qmessagebox_warning
+
+        self.assertFalse(os.path.exists(self.folder_to_delete), "Folder was not deleted.")
+
+    def test_properties_dialog_data_gathering(self):
+        from App_Gui import PropertiesDialog # Import here to use updated App_Gui
+
+        # Recreate the file if a previous delete test removed it
+        if not os.path.exists(self.file_to_delete):
+             with open(self.file_to_delete, "w") as f: f.write("content for properties test")
+
+        dialog = PropertiesDialog(self.file_to_delete, parent=None)
+
+        found_name = False
+        found_type = False
+        # Iterate through QFormLayout rows to find specific labels and their corresponding values
+        for i in range(dialog.form_layout.rowCount()):
+            label_widget = dialog.form_layout.itemAt(i, QFormLayout.ItemRole.LabelRole).widget()
+            field_widget = dialog.form_layout.itemAt(i, QFormLayout.ItemRole.FieldRole).widget()
+
+            if label_widget.text() == "Name:":
+                self.assertEqual(field_widget.text(), "delete_me.txt")
+                found_name = True
+            if label_widget.text() == "Type:":
+                self.assertEqual(field_widget.text(), "File") # Assuming it's a file
+                found_type = True
+
+        self.assertTrue(found_name, "Name field not found or incorrect in PropertiesDialog.")
+        self.assertTrue(found_type, "Type field not found or incorrect in PropertiesDialog.")
+        dialog.deleteLater()
+
+    def test_file_search_thread(self):
+        search_term = "apple"
+        # Note: FileSearchThread is a QThread, needs QApplication for signals if not run via MainWindow
+        thread = FileSearchThread(self.search_target_dir, search_term)
+
+        results = []
+        errors = []
+        completed_event = threading.Event()
+
+        def on_complete(matches):
+            nonlocal results # Python 3 closure behavior
+            results = list(matches) # Ensure it's a new list
+            completed_event.set()
+
+        def on_error(err_msg):
+            nonlocal errors
+            errors.append(err_msg)
+            completed_event.set() # Also set event on error to unblock test
+
+        thread.search_complete.connect(on_complete)
+        thread.search_error.connect(on_error)
+
+        thread.start()
+        finished_in_time = completed_event.wait(timeout=10) # Increased timeout
+
+        self.assertTrue(finished_in_time, "Search thread did not complete in time.")
+        if thread.isRunning(): # If timeout occurred but thread still running
+            thread.stop()
+            thread.wait(2000) # Wait for it to actually stop
+            if thread.isRunning(): # Force terminate if it didn't stop
+                print("Warning: Search thread had to be terminated.")
+                thread.terminate()
+                thread.wait()
+
+        self.assertEqual(len(errors), 0, f"Search encountered errors: {errors}")
+        self.assertEqual(len(results), 3, f"Expected 3 search results, got {len(results)}. Results: {results}")
+
+        result_basenames = sorted([os.path.basename(r) for r in results])
+        self.assertIn("search_file_apple.txt", result_basenames)
+        self.assertIn("another_APPLE_file.doc", result_basenames)
+        self.assertIn("sub_dir_with_apple", result_basenames)
+
 
 class TestFileTypeScannerLogic(unittest.TestCase):
     def setUp(self):
