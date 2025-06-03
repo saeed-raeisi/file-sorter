@@ -8,6 +8,7 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget,
                              QTreeWidgetItemIterator)
 from PyQt6.QtCore import Qt
 from duplicate_finder_logic import DuplicateScannerThread
+from file_type_scanner_logic import FileTypeScannerThread
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -109,7 +110,59 @@ class MainWindow(QMainWindow):
         duplicate_finder_layout.addWidget(self.dup_status_label)
 
         self.tab_widget.addTab(duplicate_finder_widget, "Duplicate Finder")
+        self.type_scanner_thread = None # Initialize thread attribute
 
+        # --- File Type Scanner Tab ---
+        self.type_scanner_tab = QWidget()
+        type_scanner_layout = QVBoxLayout(self.type_scanner_tab)
+
+        # Directory Selection Area for Type Scanner
+        type_dir_label = QLabel("Folders to Scan:")
+        type_scanner_layout.addWidget(type_dir_label)
+
+        self.type_scan_paths_list = QListWidget()
+        self.type_scan_paths_list.model().rowsInserted.connect(self.update_type_scan_button_state)
+        self.type_scan_paths_list.model().rowsRemoved.connect(self.update_type_scan_button_state)
+        type_scanner_layout.addWidget(self.type_scan_paths_list)
+
+        type_buttons_layout = QHBoxLayout()
+        self.type_add_folder_button = QPushButton("Add Folder")
+        self.type_add_folder_button.clicked.connect(self.add_type_scan_folder)
+        type_buttons_layout.addWidget(self.type_add_folder_button)
+
+        self.type_remove_folder_button = QPushButton("Remove Folder")
+        self.type_remove_folder_button.clicked.connect(self.remove_type_scan_folder)
+        type_buttons_layout.addWidget(self.type_remove_folder_button)
+        type_scanner_layout.addLayout(type_buttons_layout)
+
+        type_scan_actions_layout = QHBoxLayout() # Layout for Scan and Cancel buttons
+        self.type_scan_button = QPushButton("Scan File Types")
+        self.type_scan_button.clicked.connect(self.handle_type_scan_button_clicked)
+        self.type_scan_button.setEnabled(False)
+        type_scan_actions_layout.addWidget(self.type_scan_button)
+
+        self.type_cancel_scan_button = QPushButton("Cancel Scan")
+        self.type_cancel_scan_button.clicked.connect(self.cancel_type_scan)
+        self.type_cancel_scan_button.setEnabled(False)
+        type_scan_actions_layout.addWidget(self.type_cancel_scan_button)
+        type_scanner_layout.addLayout(type_scan_actions_layout)
+
+
+        # Results Area for Type Scanner
+        type_results_label = QLabel("Scanned File Types:")
+        type_scanner_layout.addWidget(type_results_label)
+
+        self.type_results_tree = QTreeWidget()
+        self.type_results_tree.setHeaderLabels(["File Name", "Path", "Identified Type", "Extension"])
+        type_scanner_layout.addWidget(self.type_results_tree)
+
+        self.type_status_label = QLabel("Status: Ready.")
+        type_scanner_layout.addWidget(self.type_status_label)
+
+        self.tab_widget.addTab(self.type_scanner_tab, "Type Scanner")
+
+
+    # --- Methods for Duplicate Finder Tab state ---
     def update_dup_scan_button_state(self):
         self.dup_scan_button.setEnabled(self.dup_scan_paths_list.count() > 0)
 
@@ -193,24 +246,24 @@ class MainWindow(QMainWindow):
         if os.path.isdir(potential_path): self.load_directory_contents(potential_path)
 
     # --- Methods for Duplicate Finder ---
-    def add_scan_folder(self):
-        directory = QFileDialog.getExistingDirectory(self, "Select Folder to Scan")
+    def add_scan_folder(self): # This is for Duplicate Finder
+        directory = QFileDialog.getExistingDirectory(self, "Select Folder for Duplicate Scan")
         if directory:
             items = [self.dup_scan_paths_list.item(i).text() for i in range(self.dup_scan_paths_list.count())]
             if directory not in items:
                 self.dup_scan_paths_list.addItem(directory)
-                self.dup_status_label.setText(f"Added: {directory}")
+                self.dup_status_label.setText(f"Added for duplicate scan: {directory}")
             else:
-                self.dup_status_label.setText(f"Already added: {directory}")
+                self.dup_status_label.setText(f"Already added for duplicate scan: {directory}")
 
-    def remove_scan_folder(self):
+    def remove_scan_folder(self): # This is for Duplicate Finder
         current_item = self.dup_scan_paths_list.currentItem()
         if current_item:
             removed_text = current_item.text()
             self.dup_scan_paths_list.takeItem(self.dup_scan_paths_list.row(current_item))
-            self.dup_status_label.setText(f"Removed: {removed_text}")
+            self.dup_status_label.setText(f"Removed from duplicate scan: {removed_text}")
 
-    def handle_scan_button_clicked(self):
+    def handle_scan_button_clicked(self): # This is for Duplicate Finder
         paths = [self.dup_scan_paths_list.item(i).text() for i in range(self.dup_scan_paths_list.count())]
         if not paths:
             QMessageBox.warning(self, "No Folders", "Please add folders to scan.")
@@ -333,3 +386,96 @@ class MainWindow(QMainWindow):
             self.dup_delete_button.setEnabled(False)
             # Consider re-enabling scan button if paths are still present
             self.dup_scan_button.setEnabled(self.dup_scan_paths_list.count() > 0)
+
+    # --- Methods for File Type Scanner Tab ---
+    def add_type_scan_folder(self):
+        directory = QFileDialog.getExistingDirectory(self, "Select Folder for Type Scan")
+        if directory:
+            items = [self.type_scan_paths_list.item(i).text() for i in range(self.type_scan_paths_list.count())]
+            if directory not in items:
+                self.type_scan_paths_list.addItem(directory)
+                self.type_status_label.setText(f"Added for type scan: {directory}")
+            else:
+                self.type_status_label.setText(f"Already added for type scan: {directory}")
+
+    def remove_type_scan_folder(self):
+        current_item = self.type_scan_paths_list.currentItem()
+        if current_item:
+            removed_text = current_item.text()
+            self.type_scan_paths_list.takeItem(self.type_scan_paths_list.row(current_item))
+            self.type_status_label.setText(f"Removed from type scan: {removed_text}")
+
+    def update_type_scan_button_state(self):
+        self.type_scan_button.setEnabled(self.type_scan_paths_list.count() > 0)
+
+    def handle_type_scan_button_clicked(self):
+        paths = [self.type_scan_paths_list.item(i).text() for i in range(self.type_scan_paths_list.count())]
+        if not paths:
+            QMessageBox.warning(self, "No Folders", "Please add folders to scan for file types.")
+            return
+
+        if self.type_scanner_thread and self.type_scanner_thread.isRunning():
+            QMessageBox.information(self, "Scan in Progress", "A file type scan is already running.")
+            return
+
+        self.type_add_folder_button.setEnabled(False)
+        self.type_remove_folder_button.setEnabled(False)
+        self.type_scan_button.setEnabled(False)
+        self.type_cancel_scan_button.setEnabled(True)
+
+        self.type_results_tree.clear()
+        self.type_status_label.setText("Starting file type scan...")
+
+        self.type_scanner_thread = FileTypeScannerThread(paths)
+        self.type_scanner_thread.progress_updated.connect(self.update_type_scan_progress)
+        self.type_scanner_thread.scan_complete.connect(self.populate_type_scan_results)
+        self.type_scanner_thread.error_occurred.connect(self.handle_type_scan_error)
+        self.type_scanner_thread.finished.connect(self.type_scan_thread_finished)
+        self.type_scanner_thread.start()
+
+    def cancel_type_scan(self):
+        if self.type_scanner_thread and self.type_scanner_thread.isRunning():
+            self.type_scanner_thread.stop()
+            self.type_status_label.setText("Cancelling file type scan...")
+            # self.type_cancel_scan_button.setEnabled(False) # Re-enabled/disabled in finished slot
+
+    def update_type_scan_progress(self, message, percentage):
+        self.type_status_label.setText(f"{message} [{percentage}%]" if percentage > 0 or message == "File type scan process complete." else message)
+
+    def populate_type_scan_results(self, scanned_files_data):
+        self.type_results_tree.clear()
+        if not scanned_files_data:
+            self.type_status_label.setText("Scan complete. No files found or scanned.")
+            return
+
+        self.type_status_label.setText(f"Scan complete. Processed {len(scanned_files_data)} files.")
+        for file_data in scanned_files_data:
+            item = QTreeWidgetItem(self.type_results_tree)
+            item.setText(0, file_data["filename"])
+            item.setText(1, file_data["filepath"])
+            item.setText(2, file_data["identified_type"])
+            item.setText(3, file_data["extension"])
+
+        for i in range(self.type_results_tree.columnCount()):
+            self.type_results_tree.resizeColumnToContents(i)
+
+    def handle_type_scan_error(self, error_message):
+        self.type_status_label.setText(f"Type Scan Error: {error_message}")
+        QMessageBox.critical(self, "File Type Scan Error", error_message)
+        # UI re-enabling is handled by type_scan_thread_finished
+
+    def type_scan_thread_finished(self):
+        self.type_add_folder_button.setEnabled(True)
+        self.type_remove_folder_button.setEnabled(True)
+        self.update_type_scan_button_state() # Sets scan button based on paths list
+        self.type_cancel_scan_button.setEnabled(False)
+
+        current_status = self.type_status_label.text()
+        if self.type_scanner_thread and not self.type_scanner_thread.isRunning():
+            if "Cancelling" in current_status:
+                 self.type_status_label.setText("File type scan cancelled.")
+            # elif "Error" not in current_status: # Don't overwrite error messages
+            #     self.type_status_label.setText("File type scan finished.")
+            # If no error and not cancelled, populate_type_scan_results should have set the final status.
+
+        self.type_scanner_thread = None

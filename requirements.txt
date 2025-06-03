@@ -65,6 +65,7 @@ pytest-cov==6.1.1
 pytest-json-report==1.5.0
 pytest-metadata==3.1.1
 python-apt==2.7.7+ubuntu4
+python-magic==0.4.27
 RapidFuzz==3.13.0
 requests==2.32.3
 requests-toolbelt==1.0.0

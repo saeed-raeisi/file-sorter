@@ -149,3 +149,106 @@ class TestDuplicateFinderLogic(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestFileTypeScannerLogic(unittest.TestCase):
+    def setUp(self):
+        self.test_dir = tempfile.mkdtemp()
+
+        # Sample files
+        self.txt_file_path = os.path.join(self.test_dir, "sample.txt")
+        with open(self.txt_file_path, "w") as f:
+            f.write("This is a test text file.")
+
+        self.empty_file_path = os.path.join(self.test_dir, "empty.dat")
+        open(self.empty_file_path, 'a').close()
+
+        self.html_file_path = os.path.join(self.test_dir, "sample.html")
+        with open(self.html_file_path, "w") as f:
+            f.write("<html><body><h1>Test</h1></body></html>")
+
+        self.pdf_file_path = os.path.join(self.test_dir, "sample.pdf")
+        with open(self.pdf_file_path, "wb") as f:
+            f.write(b"%PDF-1.4\n%fake content to make it non-empty...") # Minimal PDF-like start
+
+        # Directory to be scanned
+        self.scan_target_dir = os.path.join(self.test_dir, "scan_area")
+        os.makedirs(self.scan_target_dir)
+
+        shutil.copy(self.txt_file_path, self.scan_target_dir)
+        shutil.copy(self.empty_file_path, self.scan_target_dir)
+        shutil.copy(self.html_file_path, self.scan_target_dir)
+        shutil.copy(self.pdf_file_path, self.scan_target_dir)
+
+    def tearDown(self):
+        shutil.rmtree(self.test_dir)
+
+    def test_identifies_known_file_types(self):
+        progress_calls = []
+        error_calls = []
+
+        # Simple is_running_check, always true for direct calls.
+        is_running_stub = lambda: True
+
+        results = scan_files_core(
+            [self.scan_target_dir],
+            lambda m, p: progress_calls.append((m, p)),
+            lambda m: error_calls.append(m),
+            is_running_stub
+        )
+
+        self.assertEqual(len(error_calls), 0, f"Encountered errors during scan: {error_calls}")
+        self.assertEqual(len(results), 4, f"Should have processed 4 files, found {len(results)} results: {results}")
+
+        identified_types = {}
+        for r in results:
+            identified_types[r["filename"]] = r["identified_type"]
+
+        self.assertIn("sample.txt", identified_types)
+        self.assertTrue(identified_types["sample.txt"].startswith("text/plain"),
+                        f"Expected text/plain for .txt, got {identified_types['sample.txt']}")
+
+        self.assertIn("empty.dat", identified_types)
+        # Empty file type can vary based on libmagic version and OS
+        # Common types include 'inode/x-empty' and 'application/octet-stream'
+        # Sometimes 'application/x-zerosize' or others.
+        # For some libmagic versions, empty files can cause MagicException, handled in core logic.
+        empty_type = identified_types["empty.dat"]
+        self.assertTrue(
+            empty_type in ["inode/x-empty", "application/octet-stream", "application/x-zerosize"] or "MagicError: empty file" in empty_type,
+            f"Expected specific types or empty file error for empty.dat, got {empty_type}"
+        )
+
+        self.assertIn("sample.html", identified_types)
+        self.assertTrue(identified_types["sample.html"].startswith("text/html"),
+                        f"Expected text/html for .html, got {identified_types['sample.html']}")
+
+        self.assertIn("sample.pdf", identified_types)
+        # The sample PDF is very minimal. Some libmagic versions might identify it as application/pdf,
+        # others might see it as text/plain or application/octet-stream due to lack of structure.
+        pdf_type = identified_types["sample.pdf"]
+        self.assertTrue(
+            pdf_type.startswith("application/pdf") or \
+            pdf_type.startswith("text/plain") or \
+            pdf_type.startswith("application/octet-stream") or \
+            "MagicError" in pdf_type, # If libmagic has issues with the minimal content
+            f"Expected application/pdf, text/plain, or octet-stream for minimal .pdf, got {pdf_type}"
+        )
+
+    def test_scan_empty_directory_for_types(self):
+        empty_scan_dir = os.path.join(self.test_dir, "empty_for_type_scan")
+        os.makedirs(empty_scan_dir)
+        results = scan_files_core([empty_scan_dir], lambda m, p: None, lambda m: None, lambda: True)
+        self.assertEqual(len(results), 0)
+
+    def test_error_callback_for_nonexistent_dir(self):
+        error_calls = []
+        non_existent_path = os.path.join(self.test_dir, "nonexistent_dir123")
+        scan_files_core([non_existent_path], lambda m, p: None, lambda m: error_calls.append(m), lambda: True)
+
+        self.assertTrue(len(error_calls) > 0, "Error callback was not called for a non-existent directory.")
+        # Check if any of the error messages contain the expected substring
+        self.assertTrue(
+            any("Directory not found" in call and non_existent_path in call for call in error_calls),
+            f"Expected error message for non-existent directory not found in {error_calls}"
+        )
